@@ -1,21 +1,16 @@
 # ===================== IMPORTS =====================
 import pandas as pd
-import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
-
-from sklearn.preprocessing import LabelEncoder
+import torch
+import torch.nn as nn
 from sklearn.model_selection import train_test_split
-from sklearn.neural_network import MLPClassifier, MLPRegressor
+from sklearn.preprocessing import LabelEncoder
 
 # ===================== LOAD DATA =====================
 df = pd.read_csv("StudentsPerformance.csv")
 
-# ===================== CLEAN COLUMNS =====================
+# ===================== CLEAN =====================
 df.columns = df.columns.str.strip().str.lower()
-
-# ===================== REMOVE NULL =====================
-df = df.dropna()
+print("Columns:", df.columns.tolist())
 
 # ===================== ENCODE =====================
 le = LabelEncoder()
@@ -23,66 +18,83 @@ for col in df.columns:
     if df[col].dtype == 'object':
         df[col] = le.fit_transform(df[col])
 
-# ===================== SELECT MATH COLUMN =====================
-# CHECK printed columns if needed
-print("Columns:", df.columns.tolist())
-
-math_col = df.columns[5]   # 👉 change index if needed
+# ===================== SELECT TARGET COLUMN =====================
+math_col = df.columns[5]   # 🔁 change if needed
 print("Using:", math_col)
 
-# ============================================================
-# 🔴 PART 1: CLASSIFICATION (FIRST)
-# ============================================================
-
-# create classification target
+# ===================== CREATE CLASSIFICATION TARGET =====================
 df['pass'] = df[math_col].apply(lambda x: 1 if x >= 40 else 0)
 
-X = df.drop([math_col, 'pass'], axis=1)
-y_class = df['pass']
+# ===================== FEATURES =====================
+X = df.drop([math_col, 'pass'], axis=1).values
+y_class = df['pass'].values
+y_reg = df[math_col].values
 
-X_train, X_test, y_train, y_test = train_test_split(X, y_class, test_size=0.2)
+# ===================== SPLIT =====================
+X_train, X_test, y_class_train, y_class_test, y_reg_train, y_reg_test = train_test_split(
+    X, y_class, y_reg, test_size=0.2
+)
 
-# ANN Classification
-clf = MLPClassifier(hidden_layer_sizes=(64,32), max_iter=500)
-clf.fit(X_train, y_train)
+# ===================== TENSOR CONVERSION =====================
+X_train = torch.tensor(X_train, dtype=torch.float32)
+X_test  = torch.tensor(X_test,  dtype=torch.float32)
 
-print("\n=== CLASSIFICATION RESULT ===")
-print("Accuracy:", clf.score(X_test, y_test))
+y_class_train = torch.tensor(y_class_train, dtype=torch.float32).view(-1,1)
+y_class_test  = torch.tensor(y_class_test,  dtype=torch.float32).view(-1,1)
 
-# ============================================================
-# 🔵 PART 2: REGRESSION (SECOND)
-# ============================================================
+y_reg_train = torch.tensor(y_reg_train, dtype=torch.float32).view(-1,1)
+y_reg_test  = torch.tensor(y_reg_test,  dtype=torch.float32).view(-1,1)
 
-y_reg = df[math_col]
+# ===================== MODEL =====================
+class MultiTaskANN(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.shared1 = nn.Linear(input_dim, 64)
+        self.shared2 = nn.Linear(64, 32)
 
-X_train, X_test, y_train, y_test = train_test_split(X, y_reg, test_size=0.2)
+        self.class_out = nn.Linear(32, 1)  # classification
+        self.reg_out   = nn.Linear(32, 1)  # regression
 
-# ANN Regression
-reg = MLPRegressor(hidden_layer_sizes=(64,32), max_iter=500)
-reg.fit(X_train, y_train)
+    def forward(self, x):
+        x = torch.relu(self.shared1(x))
+        x = torch.relu(self.shared2(x))
 
-mae = np.mean(abs(reg.predict(X_test) - y_test))
+        class_output = torch.sigmoid(self.class_out(x))
+        reg_output   = self.reg_out(x)
 
-print("\n=== REGRESSION RESULT ===")
-print("MAE:", mae)
+        return class_output, reg_output
 
-# ============================================================
-# 🟢 HYPERPARAMETER TUNING
-# ============================================================
+model = MultiTaskANN(X_train.shape[1])
 
-reg2 = MLPRegressor(hidden_layer_sizes=(128,64), max_iter=800)
-reg2.fit(X_train, y_train)
+# ===================== LOSS + OPTIMIZER =====================
+criterion_class = nn.BCELoss()
+criterion_reg   = nn.MSELoss()
 
-mae2 = np.mean(abs(reg2.predict(X_test) - y_test))
+optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
-print("\n=== AFTER TUNING ===")
-print("New MAE:", mae2)
+# ===================== TRAIN =====================
+for epoch in range(100):
+    class_pred, reg_pred = model(X_train)
 
-# ============================================================
-# 📊 VISUALIZATION
-# ============================================================
+    loss_class = criterion_class(class_pred, y_class_train)
+    loss_reg   = criterion_reg(reg_pred, y_reg_train)
 
-plt.figure(figsize=(8,6))
-sns.heatmap(df.corr(), annot=True)
-plt.title("Correlation Heatmap")
-plt.show()# nnlp.assignment
+    loss = loss_class + loss_reg
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+# ===================== TEST =====================
+with torch.no_grad():
+    class_pred, reg_pred = model(X_test)
+
+    # classification accuracy
+    class_pred = (class_pred > 0.5).float()
+    acc = (class_pred == y_class_test).float().mean()
+
+    # regression MAE
+    mae = torch.mean(torch.abs(reg_pred - y_reg_test))
+
+print("\nClassification Accuracy:", acc.item())
+print("Regression MAE:", mae.item())
